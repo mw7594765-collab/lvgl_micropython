@@ -20,9 +20,9 @@ on:
         required: true
         default: 'ESP32_GENERIC_C3'
       flash_size:
-        description: 'Flash Size (e.g., 8, 16)'
+        description: 'Flash Size (e.g.,4, 8, 16)'
         required: true
-        default: '8'
+        default: '4'
 
 jobs:
   build-firmware:
@@ -85,8 +85,8 @@ jobs:
           # DISPLAY=all INDEV=all 表示启用所有驱动，你可以根据需要修改为特定驱动以减小体积
           python3 make.py esp32 \
             BOARD=${{ inputs.board }} \
-            --flash-size= "4" \
-            DISPLAY="st7789" \
+            --flash-size= ${{ inputs.flash_size }} \
+            DISPLAY='st7789' \
             INDEV="" \
             EXPANDER= "" \
             --no-scrub
