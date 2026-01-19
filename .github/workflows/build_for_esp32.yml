@@ -1,110 +1,99 @@
-name: Build ESP32-C3 Legacy Firmware
+name: Custom Firmware Build
 
 on:
   workflow_dispatch:
+    inputs:
+      esp_idf_version:
+        description: 'ESP-IDF Version'
+        required: true
+        default: 'v5.2.2'
+      lvgl_version:
+        description: 'LVGL Version'
+        required: true
+        default: 'v9.1.0'
+      micropython_version:
+        description: 'MicroPython Version'
+        required: true
+        default: 'v1.24.1'
+      board:
+        description: 'Target Board (e.g.,ESP32_GENERIC_C3, ESP32_GENERIC, ESP32_GENERIC_S3)'
+        required: true
+        default: 'ESP32_GENERIC_C3'
+      flash_size:
+        description: 'Flash Size (e.g., 8, 16)'
+        required: true
+        default: '8'
 
 jobs:
-  build-c3:
+  build-firmware:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Repository
+      - name: Checkout Main Repo
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake ninja-build libffi-dev git python3-pip
-          pip3 install esptool
+          sudo apt-get install -y build-essential cmake ninja-build libffi-dev pkg-config libusb-1.0-0-dev
 
-      - name: Setup MicroPython (v1.23.0) and LVGL (v9.2)
+      - name: Prepare Lib Directory
+        run: mkdir -p lib
+
+      # 1. 克隆指定版本的 MicroPython
+      - name: Clone MicroPython (${{ inputs.micropython_version }})
         run: |
-          # 初始化 MicroPython 和 LVGL
-          git submodule update --init --recursive lib/micropython
-          git submodule update --init --recursive lib/lvgl
-          
-          # 切换 MicroPython 到 v1.23.0
-          cd lib/micropython
-          git fetch --tags
-          git checkout v1.23.0
-          git submodule update --init --recursive lib/berkeley-db-1.xx
-          git submodule update --init --recursive lib/mbedtls
-          git submodule update --init --recursive lib/micropython-lib
-          cd ../..
+          echo "Cloning MicroPython ${{ inputs.micropython_version }}..."
+          git clone --depth 1 --branch ${{ inputs.micropython_version }} --recursive https://github.com/micropython/micropython.git lib/micropython
 
-          # 切换 LVGL 到 release/v9.2
-          cd lib/lvgl
-          git fetch --tags
-          git checkout release/v9.2
-          cd ../..
-
-      - name: Setup ESP-IDF v5.2.2
+      # 2. 克隆指定版本的 LVGL
+      - name: Clone LVGL (${{ inputs.lvgl_version }})
         run: |
-          # 删除 submodule 占位符，手动克隆指定版本
-          rm -rf lib/esp-idf
-          echo "Cloning ESP-IDF v5.2.2..."
-          git clone -b v5.2.2 --recursive --depth 1 https://github.com/espressif/esp-idf.git lib/esp-idf
-          
-          # 安装工具链
+          echo "Cloning LVGL ${{ inputs.lvgl_version }}..."
+          git clone --depth 1 --branch ${{ inputs.lvgl_version }} https://github.com/lvgl/lvgl.git lib/lvgl
+
+      # 3. 克隆指定版本的 ESP-IDF
+      - name: Clone ESP-IDF (${{ inputs.esp_idf_version }})
+        run: |
+          echo "Cloning ESP-IDF ${{ inputs.esp_idf_version }}..."
+          git clone --depth 1 --branch ${{ inputs.esp_idf_version }} --recursive https://github.com/espressif/esp-idf.git lib/esp-idf
+
+      # 4. 获取 pycparser (这是构建所需的额外依赖，保持默认即可)
+      - name: Clone pycparser
+        run: |
+          git clone --depth 1 https://github.com/eliben/pycparser.git lib/pycparser
+
+      # 安装 ESP-IDF 工具链
+      - name: Install ESP-IDF Tools
+        run: |
           cd lib/esp-idf
           ./install.sh all
-          cd ../..
 
-      - name: Patch Builder Script for IDF v5.2.2
-        run: |
-          # 将构建脚本中的版本检查从 5.5.1 改为 5.2.2
-          sed -i "s/IDF_VER = '5.5.1'/IDF_VER = '5.2.2'/g" builder/esp32.py
-          # 验证修改
-          grep "IDF_VER =" builder/esp32.py
-
-      - name: Build Firmware for ESP32-C3
+      # 编译固件
+      - name: Build Firmware
         shell: bash
         run: |
-          export IDF_PATH=$(pwd)/lib/esp-idf
-          source $IDF_PATH/export.sh
+          # 导入 ESP-IDF 环境变量
+          source lib/esp-idf/export.sh
           
-          # 编译命令
+          # 运行构建脚本
+          # 注意：这里我们手动指定了 make.py 参数
+          # DISPLAY=all INDEV=all 表示启用所有驱动，你可以根据需要修改为特定驱动以减小体积
           python3 make.py esp32 \
-            BOARD=ESP32_GENERIC_C3 \
-            DISPLAY=st7789 \
-            INDEV=all \
-            --flash-size=4 \
-            --optimize-size
+            BOARD=${{ inputs.board }} \
+            --flash-size= "4" \
+            DISPLAY="st7789" \
+            INDEV="" \
+            EXPANDER= "" \
+            --no-scrub
 
-      - name: Manual Firmware Merge and Check
-        run: |
-          # 定义构建目录 (v1.23.0 版本下的路径结构)
-          BUILD_DIR="lib/micropython/ports/esp32/build-ESP32_GENERIC_C3"
-          OUT_FILE="build/firmware.bin"
-          
-          echo "Checking build artifacts in $BUILD_DIR..."
-          ls -R $BUILD_DIR || true
-          
-          if [ -f "$BUILD_DIR/micropython.bin" ]; then
-            echo "Found micropython.bin, merging firmware..."
-            
-            # 创建 build 目录（如果不存在）
-            mkdir -p build
-            
-            # 使用 esptool 手动合并固件
-            # Offset 地址: Bootloader=0x0, Partition Table=0x8000, App=0x10000
-            python3 -m esptool --chip esp32c3 merge_bin \
-              -o $OUT_FILE \
-              --flash_mode dio \
-              --flash_size 4MB \
-              --flash_freq 80m \
-              0x0 "$BUILD_DIR/bootloader/bootloader.bin" \
-              0x8000 "$BUILD_DIR/partition_table/partition-table.bin" \
-              0x10000 "$BUILD_DIR/micropython.bin"
-              
-            echo "Firmware created at $OUT_FILE"
-            ls -lh $OUT_FILE
-          else
-            echo "Error: micropython.bin not found! Build might have failed silently."
-            exit 1
-          fi
-
-      - name: Upload Firmware
+      # 上传构建产物
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: micropython-lvgl-esp32c3-st7789
-          path: build/firmware.bin
+          name: firmware-${{ inputs.board }}-${{ inputs.micropython_version }}-lvgl${{ inputs.lvgl_version }}
+          path: build/
